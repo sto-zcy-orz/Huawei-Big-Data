@@ -48,6 +48,14 @@ flag = 0
 def time_dis(x,y):
     return (data["timestamp"][y]-data["timestamp"][x]).total_seconds()
 
+def dis_lon(x,y):
+    k=abs(x-y)
+    return min(360-k,k)**2
+
+def dis_lat(x,y):
+    k=abs(x-y)
+    return min(180-k,k)**2
+
 # for file in file_list:
 while True:
     file=random.choice(file_list)
@@ -56,6 +64,13 @@ while True:
                   'latitude','vesselMMSI','speed','direction','vesselNextport',
                   'vesselNextportETA','vesselStatus','vesselDatasource','TRANSPORT_TRACE']
     data["timestamp"]=pd.to_datetime(data['timestamp'], infer_datetime_format=True)
+    n=len(data["longitude"])
+    print(file)
+    s=0
+    for i in range(1,n):
+        s=max(s,dis_lon(data["longitude"][i],data["longitude"][i-1])+dis_lat(data["latitude"][i],data["latitude"][i-1]))
+    if(s<30):
+        continue #这行用来筛不对劲的数据
     fig,_=plt.subplots()
     m = Basemap()     # 实例化一个map
     m.drawcoastlines()  # 画海岸线
@@ -74,8 +89,9 @@ while True:
     flag=1
     last=0
     c=''
+
     for i in range(1,n):
-        if(time_dis(last,i)<86400):
+        if(time_dis(last,i)<86400 and i!=n-1):
             continue
         if(flag):
             c='g'
@@ -84,4 +100,5 @@ while True:
             c='r' if c!='r' else 'b'
         m.plot(lon[last:i+1],lat[last:i+1],c+".--")
         last=i
+    print(s)
     plt.show()
