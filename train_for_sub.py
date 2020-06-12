@@ -5,18 +5,18 @@ import os
 from sklearn.metrics import mean_squared_error, explained_variance_score
 from sklearn.model_selection import KFold
 import lightgbm as lgb
+
 import warnings
 
 warnings.filterwarnings('ignore')
 
 # baseline只用到gps定位数据，即train_gps_path
 train_gps_path = './data/train0523.csv'
-test_data_path = 'self_test.csv'
+test_data_path = './data/A_testData0531.csv'
 order_data_path = './data/loadingOrderEvent.csv'
 port_data_path = './data/port.csv'
 split_data_path = './data/split'
 file_list = os.listdir(split_data_path)
-
 port_data = pd.read_csv(port_data_path)
 
 # 取前1000000行
@@ -37,12 +37,7 @@ def get_data(data, mode='train'):
     data['latitude'] = data['latitude'].astype(float)
     data['speed'] = data['speed'].astype(float)
     data['direction'] = data['direction'].astype(float)
-    if mode == 'test':
-        onboard = data.groupby('loadingOrder')['timestamp'].agg(mmin='min').reset_index()
-        data = data.merge(onboard, on='loadingOrder', how='left')
-        data['onboardDate'] = data['mmin']
-        data['onboardDate'] = pd.to_datetime(data['onboardDate'], infer_datetime_format=True)
-        data = data.drop('mmin', axis=1)
+
     return data
 
 def get_feature(df, mode='train'):
@@ -64,24 +59,21 @@ def get_feature(df, mode='train'):
     elif mode == 'test':
         group_df = df.groupby('loadingOrder')['timestamp'].agg(count='count').reset_index()
 
-    #处理路由数据
-    mmsi_df = df.groupby('loadingOrder')[['vesselMMSI', 'TRANSPORT_TRACE']].agg(
-        lambda x: x.value_counts().index[0]).reset_index()
+    #处理路由和识别码等数据
+
+    #df['TRANSPORT_TRACE_start'] = df.apply(lambda x: x['TRANSPORT_TRACE'].split('-')[0])
+    #df['TRANSPORT_TRACE_start'] = df.apply(lambda x: x['TRANSPORT_TRACE'].split('-')[-1])
+    mmsi_df = df.groupby('loadingOrder')[['vesselMMSI', 'TRANSPORT_TRACE']].agg(lambda x: x.value_counts().index[0]).reset_index()
     group_df = group_df.merge(mmsi_df, on='loadingOrder', how='left')
     mmsi_df = pd.DataFrame({
         'loadingOrder': group_df['loadingOrder'],
-        'TRANSPORT_TRACE_start': [x.split('-')[0].replace(" ","").upper() for x in group_df['TRANSPORT_TRACE']],
-        'TRANSPORT_TRACE_final': [x.split('-')[-1].replace(" ","").upper() for x in group_df['TRANSPORT_TRACE']]
+        'TRANSPORT_TRACE_start': [x.split('-')[0] for x in group_df['TRANSPORT_TRACE']],
+        'TRANSPORT_TRACE_final': [x.split('-')[-1] for x in group_df['TRANSPORT_TRACE']]
     })
     group_df = group_df.merge(mmsi_df, on='loadingOrder', how='left')
     group_df = group_df.drop('TRANSPORT_TRACE', axis=1)
 
-    #处理起点数据
-    zuobiao_df = df.groupby('loadingOrder')[['longitude', 'latitude']].agg(lambda x: round(x[0:1])).reset_index()
-    zuobiao_df.columns = ['loadingOrder', 'first_longitude', 'first_latitude']
-    group_df = group_df.merge(zuobiao_df, on='loadingOrder', how='left')
-
-    #处理终点数据
+    # 处理终点数据
     trace_final = [x.replace(" ", "").upper() for x in port_data['TRANS_NODE_NAME'].tolist()]
 
     final_x = port_data['LONGITUDE'].tolist()
@@ -92,13 +84,12 @@ def get_feature(df, mode='train'):
         lambda x: x.value_counts().index[0]).reset_index()"""
     zuobiao_df = pd.DataFrame({
         'loadingOrder': group_df['loadingOrder'],
-        #'TRANSPORT_TRACE_final': [x.replace(" ", "").upper() for x in group_df['TRANSPORT_TRACE_final']],
+        # 'TRANSPORT_TRACE_final': [x.replace(" ", "").upper() for x in group_df['TRANSPORT_TRACE_final']],
         'last_longitude': [round(port_dict_x[x]) for x in group_df['TRANSPORT_TRACE_final']],
         'last_latitude': [round(port_dict_y[x]) for x in group_df['TRANSPORT_TRACE_final']]
     })
     group_df = group_df.merge(zuobiao_df, on='loadingOrder', how='left')
 
-    #处理中位数那些什么的
     anchor_df = df.groupby('loadingOrder')['anchor'].agg('sum').reset_index()
     anchor_df.columns = ['loadingOrder', 'anchor_cnt']
     group_df = group_df.merge(anchor_df, on='loadingOrder', how='left')
@@ -118,25 +109,16 @@ def get_feature(df, mode='train'):
     return group_df
 
 test_data = pd.read_csv(test_data_path)
-#test_data['onboardDate'] = test_data['timestamp']
 
 def drop_for_status(data):
     data = data[data['status'] != 'Dropped']
     data = data.drop('status', axis=1)
     data = data.drop('rate', axis=1)
-    #data = data.drop('TRANSPORT_TRACE_start', axis=1)
-    #data = data.drop('TRANSPORT_TRACE_final', axis=1)
-    #data = data.drop('vesselMMSI', axis=1)
-    data = data[data['label'] > 1.5 * 60 * 24 * 60]
-    #data = data[data['direction_max'] > 5000]
-    #data = data[data['direction_max'] < 40000]
-
-    #data = data[data['direction_min'] < 17500]
-    #data = data.drop('TRANSPORT_TRACE_start', axis=1)
-    #data = data.drop('TRANSPORT_TRACE_final', axis=1)
-    #data = data[data['label'] < 40.0 * 60 * 24 * 60]
+    data = data[data['label'] > 5 * 60 * 24 * 60]
+    data = data[data['label'] < 50.0 * 60 * 24 * 60]
     #data = data[data['count'] > 30]
     #data = data.dropna(axis=0, how="any")
+    #data = data[str(data['TRANSPORT_TRACE_start']) != 'nan']
     return data
 
 #丢掉一些相对于测试集的异常值，置信区间用3sigma
@@ -169,16 +151,12 @@ transport = pd.read_csv('transport_trace_fea.csv', index_col=0)
 transport = transport.drop('id', axis=1)
 train = train.merge(transport, on='loadingOrder', how='left')
 
-#合并起点坐标
-zuobiao = pd.read_csv('first_zuobiao.csv', index_col=0)
-zuobiao = zuobiao.drop('id',axis=1)
-train = train.merge(zuobiao, on='loadingOrder', how='left')
-
 #合并终点坐标
 zuobiao = pd.read_csv('last_zuobiao.csv', index_col=0)
 zuobiao = zuobiao.drop('id',axis=1)
 train = train.merge(zuobiao, on='loadingOrder', how='left')
 
+print(train)
 print(train.shape)
 #train.to_csv('train_fea.csv', index=True)
 train = drop_for_status(train)
@@ -187,30 +165,19 @@ test_data = get_data(test_data, mode='test')
 
 #train = get_feature(train_data, mode='train')
 test = get_feature(test_data.copy(), mode='test')
-test.to_csv('self_test_fea.csv', index=True)
+test.to_csv('test_fea.csv', index=True)
 
-def drop_for_test(data, test):
-    order = test['loadingOrder']
-    for i in order:
-        data = data[data['loadingOrder'] != i]
-    return data
-
-train = drop_for_test(train, test)
-
-train = drop_Outliers(train, test)
+#train = drop_Outliers(train, test)
 
 print(train.shape)
 features = [c for c in train.columns if c not in ['loadingOrder', 'label', 'mmin', 'mmax', 'count', 'vesselMMSI', 'TRANSPORT_TRACE_final']]
 #features = ['vesselMMSI', 'TRANSPORT_TRACE_start', 'TRANSPORT_TRACE_final']
-
-#features = ['first_longitude', 'first_latitude', 'last_longitude', 'last_latitude']
 print(features)
 
 # 改变训练集的正态分布
 def change_distribute(data, target, features):
     for i in features:
         if (isinstance(data[i][0], str) == True): continue
-        if (i == 'first_longitude') or (i == 'first_latitude') or (i == 'last_longitude') or (i == 'last_latitude'): continue
         if (i == 'label'): continue
         mu, sigma = np.mean(data[i]), np.std(data[i])
         #print(mu, sigma)
@@ -221,9 +188,6 @@ def change_distribute(data, target, features):
         #print(mu2, sigma2)
     return data
 
-train['vesselMMSI'] = train['vesselMMSI'].astype('category')
-train['TRANSPORT_TRACE_start'] = train['TRANSPORT_TRACE_start'].astype('category')
-train['TRANSPORT_TRACE_final'] = train['TRANSPORT_TRACE_final'].astype('category')
 #train = change_distribute(train, test, features)
 
 def mse_score_eval(preds, valid):
@@ -244,14 +208,14 @@ def build_model(train, test, pred, label, seed=1080, is_shuffle=True):
         'learning_rate': 0.01,
         'boosting_type': 'gbdt',
         'objective': 'regression',
-        'num_leaves': 36,
-        'feature_fraction': 0.7,
+        'num_leaves': 31,
+        'feature_fraction': 0.6,
         'bagging_fraction': 0.7,
         'bagging_freq': 6,
-        'seed': 88,
-        'bagging_seed': 11,
-        'feature_fraction_seed': 77,
-        'min_data_in_leaf': 15,
+        'seed': 8,
+        'bagging_seed': 1,
+        'feature_fraction_seed': 7,
+        'min_data_in_leaf': 20,
         'nthread': 8,
         'verbose': 1,
     }
@@ -280,22 +244,15 @@ def build_model(train, test, pred, label, seed=1080, is_shuffle=True):
 
     return test[['loadingOrder', 'label']]
 
-
+train['vesselMMSI'] = train['vesselMMSI'].astype('category')
+train['TRANSPORT_TRACE_start'] = train['TRANSPORT_TRACE_start'].astype('category')
+train['TRANSPORT_TRACE_final'] = train['TRANSPORT_TRACE_final'].astype('category')
 result = build_model(train, test, features, 'label', is_shuffle=True)
 
-"""mse = mean_squared_error(y_true=yi, y_pred=er)
-print('test_ans:')
-print(mse)"""
-
-test_ETA = pd.read_csv(test_data_path)
 test_data = test_data.merge(result, on='loadingOrder', how='left')
 test_data['ETA'] = (test_data['onboardDate'] + test_data['label'].apply(lambda x: pd.Timedelta(seconds=x))).apply(
     lambda x: x.strftime('%Y/%m/%d  %H:%M:%S'))
-yi = pd.to_datetime(test_data['ETA'], infer_datetime_format=True, utc=True)
-er = pd.to_datetime(test_ETA['realETA'], infer_datetime_format=True)
-mse = (yi - er).dt.total_seconds()/60/60
-print(np.sum(mse ** 2)/len(mse))
-"""test_data.drop(['direction', 'TRANSPORT_TRACE'], axis=1, inplace=True)
+test_data.drop(['direction', 'TRANSPORT_TRACE'], axis=1, inplace=True)
 test_data['onboardDate'] = test_data['onboardDate'].apply(lambda x: x.strftime('%Y/%m/%d  %H:%M:%S'))
 test_data['creatDate'] = pd.datetime.now().strftime('%Y/%m/%d  %H:%M:%S')
 test_data['timestamp'] = test_data['temp_timestamp']
@@ -304,6 +261,6 @@ result = test_data[
     ['loadingOrder', 'timestamp', 'longitude', 'latitude', 'carrierName', 'vesselMMSI', 'onboardDate', 'ETA',
      'creatDate']]
 
-result.to_csv('result_self.csv', index=False)"""
+result.to_csv('result.csv', index=False)
 
 
