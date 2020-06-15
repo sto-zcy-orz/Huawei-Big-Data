@@ -45,6 +45,42 @@ def get_data(data, mode='train'):
         data = data.drop('mmin', axis=1)
     return data
 
+def geohash_encode(latitude, longitude, precision=5):
+    """
+    Encode a position given in float arguments latitude, longitude to
+    a geohash which will have the character count precision.
+    """
+    lat_interval, lon_interval = (-90.0, 90.0), (-180.0, 180.0)
+    base32 = '0123456789bcdefghjkmnpqrstuvwxyz'
+    geohash = []
+    bits = [16, 8, 4, 2, 1]
+    bit = 0
+    ch = 0
+    even = True
+    while len(geohash) < precision:
+        if even:
+            mid = (lon_interval[0] + lon_interval[1]) / 2
+            if longitude > mid:
+                ch |= bits[bit]
+                lon_interval = (mid, lon_interval[1])
+            else:
+                lon_interval = (lon_interval[0], mid)
+        else:
+            mid = (lat_interval[0] + lat_interval[1]) / 2
+            if latitude > mid:
+                ch |= bits[bit]
+                lat_interval = (mid, lat_interval[1])
+            else:
+                lat_interval = (lat_interval[0], mid)
+        even = not even
+        if bit < 4:
+            bit += 1
+        else:
+            geohash += base32[ch]
+            bit = 0
+            ch = 0
+    return ''.join(geohash)
+
 def get_feature(df, mode='train'):
     assert mode == 'train' or mode == 'test'
 
@@ -70,8 +106,8 @@ def get_feature(df, mode='train'):
     group_df = group_df.merge(mmsi_df, on='loadingOrder', how='left')
     mmsi_df = pd.DataFrame({
         'loadingOrder': group_df['loadingOrder'],
-        'TRANSPORT_TRACE_start': [x.split('-')[0].replace(" ","").upper() for x in group_df['TRANSPORT_TRACE']],
-        'TRANSPORT_TRACE_final': [x.split('-')[-1].replace(" ","").upper() for x in group_df['TRANSPORT_TRACE']]
+        'TRANSPORT_TRACE_start': [x.split('-')[0].replace(" ", "").upper() for x in group_df['TRANSPORT_TRACE']],
+        'TRANSPORT_TRACE_final': [x.split('-')[-1].replace(" ", "").upper() for x in group_df['TRANSPORT_TRACE']]
     })
     group_df = group_df.merge(mmsi_df, on='loadingOrder', how='left')
     group_df = group_df.drop('TRANSPORT_TRACE', axis=1)
@@ -98,6 +134,46 @@ def get_feature(df, mode='train'):
     })
     group_df = group_df.merge(zuobiao_df, on='loadingOrder', how='left')
 
+    # 处理距离
+    first_x = group_df['first_longitude'].tolist()
+    first_y = group_df['first_latitude'].tolist()
+    last_x = group_df['last_longitude'].tolist()
+    last_y = group_df['last_latitude'].tolist()
+    lenx = len(first_x)
+    distance_df = pd.DataFrame({
+        'loadingOrder': group_df['loadingOrder'],
+        'distance': [(first_x[i] - last_x[i]) ** 2 + (first_y[i] - last_y[i]) ** 2 for i in range(lenx)]
+    })
+    group_df = group_df.merge(distance_df, on='loadingOrder', how='left')
+
+    # 处理carrierName
+    carrier_df = df.groupby('loadingOrder')[['carrierName']].agg(
+        lambda x: x.value_counts().index[0]).reset_index()
+    group_df = group_df.merge(carrier_df, on='loadingOrder', how='left')
+
+    # 处理起点的geohash
+    geohash_df = pd.DataFrame({
+        'loadingOrder': group_df['loadingOrder'],
+        'first_geohash': [geohash_encode(first_x[i], first_y[i]) for i in range(lenx)]
+    })
+    group_df = group_df.merge(geohash_df, on='loadingOrder', how='left')
+
+    # 处理终点的geohash
+    geohash_df = pd.DataFrame({
+        'loadingOrder': group_df['loadingOrder'],
+        'last_geohash': [geohash_encode(last_x[i], last_y[i]) for i in range(lenx)]
+    })
+    group_df = group_df.merge(geohash_df, on='loadingOrder', how='left')
+
+    # 起点终点geohash合并
+    geo_x = group_df['first_geohash'].tolist()
+    geo_y = group_df['last_geohash'].tolist()
+    geohash_df = pd.DataFrame({
+        'loadingOrder': group_df['loadingOrder'],
+        'both_geohash': [geo_x[i]+'_'+geo_y[i] for i in range(lenx)]
+    })
+    group_df = group_df.merge(geohash_df, on='loadingOrder', how='left')
+
     #处理中位数那些什么的
     anchor_df = df.groupby('loadingOrder')['anchor'].agg('sum').reset_index()
     anchor_df.columns = ['loadingOrder', 'anchor_cnt']
@@ -112,9 +188,12 @@ def get_feature(df, mode='train'):
     group_df = group_df.merge(group, on='loadingOrder', how='left')
 
     group_df['vesselMMSI'] = group_df['vesselMMSI'].astype('category')
+    group_df['carrierName'] = group_df['carrierName'].astype('category')
     group_df['TRANSPORT_TRACE_start'] = group_df['TRANSPORT_TRACE_start'].astype('category')
     group_df['TRANSPORT_TRACE_final'] = group_df['TRANSPORT_TRACE_final'].astype('category')
-
+    group_df['first_geohash'] = group_df['first_geohash'].astype('category')
+    group_df['last_geohash'] = group_df['last_geohash'].astype('category')
+    group_df['both_geohash'] = group_df['both_geohash'].astype('category')
     return group_df
 
 test_data = pd.read_csv(test_data_path)
@@ -135,8 +214,8 @@ def drop_for_status(data):
     #data = data.drop('TRANSPORT_TRACE_start', axis=1)
     #data = data.drop('TRANSPORT_TRACE_final', axis=1)
     #data = data[data['label'] < 40.0 * 60 * 24 * 60]
-    #data = data[data['count'] > 30]
-    #data = data.dropna(axis=0, how="any")
+    data = data[data['count'] < 20000]
+    data = data.dropna(axis=0, how="any")
     return data
 
 #丢掉一些相对于测试集的异常值，置信区间用3sigma
@@ -171,13 +250,46 @@ train = train.merge(transport, on='loadingOrder', how='left')
 
 #合并起点坐标
 zuobiao = pd.read_csv('first_zuobiao.csv', index_col=0)
-zuobiao = zuobiao.drop('id',axis=1)
+zuobiao = zuobiao.drop('id', axis=1)
 train = train.merge(zuobiao, on='loadingOrder', how='left')
 
 #合并终点坐标
 zuobiao = pd.read_csv('last_zuobiao.csv', index_col=0)
-zuobiao = zuobiao.drop('id',axis=1)
+zuobiao = zuobiao.drop('id', axis=1)
 train = train.merge(zuobiao, on='loadingOrder', how='left')
+
+#合并直线距离
+distance = pd.read_csv('distance.csv', index_col=0)
+#distance = distance.drop('id', axis=1)
+train = train.merge(distance, on='loadingOrder', how='left')
+
+#合并carrierName
+carrierName = pd.read_csv('carrierName.csv', index_col=0)
+carrierName = carrierName.drop('id', axis=1)
+train = train.merge(carrierName, on='loadingOrder', how='left')
+
+#合并first_geohash
+first_geohash = pd.read_csv('first_geohash.csv', index_col=0)
+first_geohash = first_geohash.drop('id', axis=1)
+train = train.merge(first_geohash, on='loadingOrder', how='left')
+
+#合并last_geohash
+last_geohash = pd.read_csv('last_geohash.csv', index_col=0)
+last_geohash = last_geohash.drop('id', axis=1)
+train = train.merge(last_geohash, on='loadingOrder', how='left')
+
+#合并first和last的geohash
+df = train.groupby('loadingOrder')[['first_geohash', 'last_geohash']].agg(
+        lambda x: x.value_counts().index[0]).reset_index()
+geo_x = df['first_geohash'].tolist()
+geo_y = df['last_geohash'].tolist()
+lenx = len(geo_x)
+geohash_df = pd.DataFrame({
+    'loadingOrder': df['loadingOrder'],
+    'both_geohash': [geo_x[i]+'_'+geo_y[i] for i in range(lenx)]
+})
+train = train.merge(geohash_df, on='loadingOrder', how='left')
+
 
 print(train.shape)
 #train.to_csv('train_fea.csv', index=True)
@@ -197,13 +309,13 @@ def drop_for_test(data, test):
 
 train = drop_for_test(train, test)
 
-train = drop_Outliers(train, test)
+#train = drop_Outliers(train, test)
 
 print(train.shape)
-features = [c for c in train.columns if c not in ['loadingOrder', 'label', 'mmin', 'mmax', 'count', 'vesselMMSI', 'TRANSPORT_TRACE_final']]
+features = [c for c in train.columns if c not in ['loadingOrder', 'label', 'mmin', 'mmax', 'count', 'vesselMMSI', 'TRANSPORT_TRACE_final','carrierName', 'last_geohash', 'first_geohash']]
 #features = ['vesselMMSI', 'TRANSPORT_TRACE_start', 'TRANSPORT_TRACE_final']
 
-#features = ['first_longitude', 'first_latitude', 'last_longitude', 'last_latitude']
+#features = ['TRANSPORT_TRACE_start', 'first_geohash', 'last_geohash', 'first_longitude', 'first_latitude', 'last_longitude', 'last_latitude']
 print(features)
 
 # 改变训练集的正态分布
@@ -222,8 +334,12 @@ def change_distribute(data, target, features):
     return data
 
 train['vesselMMSI'] = train['vesselMMSI'].astype('category')
+train['carrierName'] = train['carrierName'].astype('category')
 train['TRANSPORT_TRACE_start'] = train['TRANSPORT_TRACE_start'].astype('category')
 train['TRANSPORT_TRACE_final'] = train['TRANSPORT_TRACE_final'].astype('category')
+train['first_geohash'] = train['first_geohash'].astype('category')
+train['last_geohash'] = train['last_geohash'].astype('category')
+train['both_geohash'] = train['both_geohash'].astype('category')
 #train = change_distribute(train, test, features)
 
 def mse_score_eval(preds, valid):
@@ -235,17 +351,17 @@ def mse_score_eval(preds, valid):
 def build_model(train, test, pred, label, seed=1080, is_shuffle=True):
     train_pred = np.zeros((train.shape[0],))
     test_pred = np.zeros((test.shape[0],))
-    n_splits = 10
+    n_splits = 5
     # Kfold
     fold = KFold(n_splits=n_splits, shuffle=is_shuffle, random_state=seed)
     kf_way = fold.split(train[pred])
     # params
     params = {
-        'learning_rate': 0.01,
+        'learning_rate': 0.009,
         'boosting_type': 'gbdt',
         'objective': 'regression',
         'num_leaves': 36,
-        'feature_fraction': 0.7,
+        'feature_fraction': 0.6,
         'bagging_fraction': 0.7,
         'bagging_freq': 6,
         'seed': 88,
