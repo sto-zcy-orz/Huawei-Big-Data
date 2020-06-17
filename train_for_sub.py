@@ -14,7 +14,7 @@ warnings.filterwarnings('ignore')
 train_gps_path = './data/train0523.csv'
 test_data_path = './data/A_testData0531.csv'
 order_data_path = './data/loadingOrderEvent.csv'
-port_data_path = './data/port.csv'
+port_data_path = 'myports_new.csv'
 split_data_path = './data/split'
 file_list = os.listdir(split_data_path)
 port_data = pd.read_csv(port_data_path)
@@ -115,12 +115,12 @@ def get_feature(df, mode='train'):
     group_df = group_df.merge(zuobiao_df, on='loadingOrder', how='left')
 
     # 处理终点数据
-    trace_final = [x.replace(" ", "").upper() for x in port_data['TRANS_NODE_NAME'].tolist()]
-
-    final_x = port_data['LONGITUDE'].tolist()
-    final_y = port_data['LATITUDE'].tolist()
-    port_dict_x = dict(zip(trace_final, final_x))
-    port_dict_y = dict(zip(trace_final, final_y))
+    # trace_final = [x.replace(" ", "").upper() for x in port_data['TRANS_NODE_NAME'].tolist()]
+    trace_all = [x.replace(" ", "").upper() for x in port_data['router'].tolist()]
+    final_x = port_data['longitude'].tolist()
+    final_y = port_data['latitude'].tolist()
+    port_dict_x = dict(zip(trace_all, final_x))
+    port_dict_y = dict(zip(trace_all, final_y))
     """zuobiao_df = group_df.groupby('loadingOrder')[['TRANSPORT_TRACE_final']].agg(
         lambda x: x.value_counts().index[0]).reset_index()"""
     zuobiao_df = pd.DataFrame({
@@ -181,11 +181,18 @@ test_data = pd.read_csv(test_data_path)
 
 def drop_for_status(data):
     data = data[data['status'] != 'Dropped']
+    #data = data[data['drop_far'] != 'Dropped']
+    #data = data[data['drop_repeat'] != 'Dropped']
+    data = data[data['drop_for_test'] != 'Dropped']
     data = data.drop('status', axis=1)
+    data = data.drop('drop_repeat', axis=1)
+    data = data.drop('drop_far', axis=1)
+    data = data.drop('drop_for_test', axis=1)
     data = data.drop('rate', axis=1)
     data = data[data['label'] > 5 * 60 * 24 * 60]
     data = data[data['label'] < 50.0 * 60 * 24 * 60]
     data = data[data['count'] < 20000]
+    #data = data[data['anchor_cnt'] < 4000]
     #data = data[data['count'] > 30]
     #data = data.dropna(axis=0, how="any")
     #data = data[str(data['TRANSPORT_TRACE_start']) != 'nan']
@@ -217,7 +224,7 @@ train = train.drop('label', axis=1)
 train = train.merge(label_true, on='loadingOrder', how='left')
 
 # 合并路由之类的数据
-transport = pd.read_csv('transport_trace_fea.csv', index_col=0)
+transport = pd.read_csv('transport_trace_fea_fix.csv', index_col=0)
 transport = transport.drop('id', axis=1)
 train = train.merge(transport, on='loadingOrder', how='left')
 
@@ -241,21 +248,76 @@ last_geohash = pd.read_csv('last_geohash.csv', index_col=0)
 last_geohash = last_geohash.drop('id', axis=1)
 train = train.merge(last_geohash, on='loadingOrder', how='left')
 
-print(train)
-print(train.shape)
-#train.to_csv('train_fea.csv', index=True)
-train = drop_for_status(train)
+#合并要drop的东西
+drop_far = pd.read_csv('drop_far.csv', index_col=0)
+train = train.merge(drop_far, on='loadingOrder', how='left')
+
+#合并要drop的东西
+drop_repeat = pd.read_csv('drop_repeat.csv', index_col=0)
+train = train.merge(drop_repeat, on='loadingOrder', how='left')
+
+def get_test_trace(test):
+    df = test.groupby('loadingOrder')[['TRANSPORT_TRACE_start', 'TRANSPORT_TRACE_final']].agg(
+        lambda x: x.value_counts().index[0]).reset_index()
+    az = {}
+    for i in range(df.shape[0]):
+        x = (df['TRANSPORT_TRACE_start'][i], df['TRANSPORT_TRACE_final'][i])
+        az[x] = az.get(x, 0) + 1
+    return az
+
+def drop_for_test_trace(train, az):
+    df = train.groupby('loadingOrder')[['TRANSPORT_TRACE_start', 'TRANSPORT_TRACE_final']].agg(
+        lambda x: x.value_counts().index[0]).reset_index()
+    df1 = train.groupby('loadingOrder')[['drop_far', 'drop_repeat']].agg(
+        lambda x: x.value_counts().index[0]).reset_index()
+    drop_for_test = pd.DataFrame(columns=['loadingOrder', 'drop_for_test'])
+    for i in range(df.shape[0]):
+        x = (df['TRANSPORT_TRACE_start'][i], df['TRANSPORT_TRACE_final'][i])
+        if (az.get(x, 0) != 0):
+            d = ({
+                'loadingOrder': df['loadingOrder'][i],
+                'drop_for_test': 'Nice'
+            })
+            drop_for_test = drop_for_test.append(d, ignore_index=True)
+        elif (df1['drop_far'][i] == 'Nice') and (df1['drop_repeat'][i] == 'Nice'):
+            d = ({
+                'loadingOrder': df['loadingOrder'][i],
+                'drop_for_test': 'Nice'
+            })
+            drop_for_test = drop_for_test.append(d, ignore_index=True)
+        else:
+            d = ({
+                'loadingOrder': df['loadingOrder'][i],
+                'drop_for_test': 'Dropped'
+            })
+            drop_for_test = drop_for_test.append(d, ignore_index=True)
+    return drop_for_test
+
 
 test_data = get_data(test_data, mode='test')
 
 #train = get_feature(train_data, mode='train')
 test = get_feature(test_data.copy(), mode='test')
+#把不是test中的航线扔掉
+az = get_test_trace(test)
+drop_for_test = drop_for_test_trace(train, az)
+train = train.merge(drop_for_test, on='loadingOrder', how='left')
+
+print(train)
+print(train.shape)
+#train.to_csv('train_fea.csv', index=True)
+train = drop_for_status(train)
+
+
+
+train.to_csv('sub_features_add.csv', index=True)
 test.to_csv('test_fea.csv', index=True)
 
 #train = drop_Outliers(train, test)
 
 print(train.shape)
-features = [c for c in train.columns if c not in ['loadingOrder', 'label', 'mmin', 'mmax', 'count', 'vesselMMSI', 'TRANSPORT_TRACE_final', 'last_geohash', 'first_geohash', 'both_geohash']]
+features = [c for c in train.columns if c not in ['loadingOrder', 'label', 'mmin', 'mmax', 'count', 'vesselMMSI', 'TRANSPORT_TRACE_final','carrierName', 'last_geohash', 'first_geohash', 'both_geohash',
+                                                   'anchor_cnt', 'latitude_median', 'latitude_min', 'latitude_max', 'latitude_mean']]
 #features = ['vesselMMSI', 'TRANSPORT_TRACE_start', 'TRANSPORT_TRACE_final']
 print(features)
 
@@ -329,7 +391,7 @@ def build_model(train, test, pred, label, seed=1080, is_shuffle=True):
 
     return test[['loadingOrder', 'label']]
 
-train['vesselMMSI'] = train['vesselMMSI'].astype('category')
+#train['vesselMMSI'] = train['vesselMMSI'].astype('category')
 train['TRANSPORT_TRACE_start'] = train['TRANSPORT_TRACE_start'].astype('category')
 train['TRANSPORT_TRACE_final'] = train['TRANSPORT_TRACE_final'].astype('category')
 train['first_geohash'] = train['first_geohash'].astype('category')
